@@ -1,0 +1,855 @@
+---
+title: "1D_data_smoothing_of_different_splines"
+author: "Sai Pradeep Peri"
+date: "11/4/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r, eval=TRUE}
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(broom)
+library(splines)
+library(purrr)
+```
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 80
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1)
+) 
+fine_grid_list
+```
+```{r}
+fine_grid <- fine_grid_list %>% as.data.frame() %>% tibble::as_tibble()
+fine_basis_mat <- model.matrix(~ ns(x1, df = 8) -1, data = fine_grid)
+colnames(fine_basis_mat) 
+```
+
+```{r}
+fine_basis_mat %>% as.data.frame() %>% tbl_df() %>%
+  mutate(x1 = fine_grid$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+
+
+```{r}
+set.seed(4545)
+beta_true <- rnorm(n = ncol(fine_basis_mat), mean = 0, sd = 3)
+beta_true
+```
+
+```{r}
+mean_trend_true <- as.numeric(fine_basis_mat %*% as.matrix(beta_true))
+mean_trend_true
+```
+
+
+
+```{r}
+fine_grid_df <- fine_grid %>% mutate(mean_trend = mean_trend_true)
+fine_grid_df
+```
+
+```{r}
+fine_grid_df %>%
+  ggplot(mapping = aes(x = x1, y = mean_trend)) +
+  geom_line(size = 1.15) +
+  theme_bw()
+```
+
+
+```{r, eval=TRUE}
+### generate the noisy observations
+sd_noise_1d <- 0.2 # noise
+
+set.seed(65646)
+fine_df_1d <- fine_grid_df %>% 
+  mutate(y = rnorm(n = n(), mean = mean_trend, sd = sd_noise_1d))
+fine_df_1d
+```
+
+
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 40
+
+coarse_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid <- coarse_grid_list %>% as.data.frame() %>% tibble::as_tibble()
+coarse_grid
+```
+
+```{r,eval=TRUE}
+train_df_1d <- fine_df_1d %>% 
+  right_join(coarse_grid, by = c("x1"))
+
+train_df_1d
+```
+
+```{r, eval=TRUE}
+train_df_1d %>%
+  ggplot(mapping = aes(x = x1, y = mean_trend)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# Using ThinPlateSplines for fitting the above function
+
+```{r}
+ThinPlateSplines_fit_func_No_Reg <- function(df_1, data){
+  model <- lm(y ~ smoothCon(s(x1, k=df_1, bs = 'ts'), data = data)[[1]]$X - 1, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1)
+  return(metrics)
+}
+```
+
+
+```{r}
+df_grid<-  list(x1 = c(5:18)) %>% as.data.frame() %>% tbl_df()
+df_grid
+```
+
+```{r}
+ThinPlateSplines_comp_fit <- map_dfr(df_grid$x1, ThinPlateSplines_fit_func_No_Reg, data = train_df_1d)
+ThinPlateSplines_comp_fit
+```
+
+
+```{r, eval = TRUE}
+df_best_ThinPlateSplines_AIC <- ThinPlateSplines_comp_fit %>% filter(AIC == min(AIC)) %>% select(df_1)
+df_best_ThinPlateSplines_AIC
+```
+
+```{r}
+ThinPlateSplines_smooth_Best_AIC = smoothCon(s(x1, k=df_best_ThinPlateSplines_AIC$df_1, bs = 'ts'), data = train_df_1d)[[1]]
+ThinPlateSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+ThinPlateSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+ThinPlateSplines_train_df <- ThinPlateSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+ThinPlateSplines_smooth_Best_AIC_fit <- lm(y ~ . - 1, data = ThinPlateSplines_train_df)
+ThinPlateSplines_smooth_Best_AIC_fit %>% summary()
+coefplot::coefplot(ThinPlateSplines_smooth_Best_AIC_fit) + theme_bw()
+ThinPlateSplines_smooth_Best_AIC_fit %>% glance()
+```
+
+
+# Prediction
+
+```{r, eval=TRUE}
+ThinPlateSplines_test_basis_df <- PredictMat(ThinPlateSplines_smooth_Best_AIC, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+ThinPlateSplines_test_pred <- predict(ThinPlateSplines_smooth_Best_AIC_fit, newdata = ThinPlateSplines_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = ThinPlateSplines_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# Overfitted ThinPlateSplines model
+
+```{r}
+ThinPlateSplines_smooth_overfit = smoothCon(s(x1, k=30, bs = 'ts'), data = train_df_1d)[[1]]
+ThinPlateSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+ThinPlateSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+ThinPlateSplines__overfit_train_df <- ThinPlateSplines_smooth_overfit$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+ThinPlateSplines_smooth_overfit_fit <- lm(y ~ . - 1, data = ThinPlateSplines__overfit_train_df)
+ThinPlateSplines_smooth_overfit_fit %>% summary()
+coefplot::coefplot(ThinPlateSplines_smooth_overfit_fit) + theme_bw()
+ThinPlateSplines_smooth_overfit_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+ThinPlateSplines_overfit_test_basis_df <- PredictMat(ThinPlateSplines_smooth_overfit, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+ThinPlateSplines_overfit_test_pred <- predict(ThinPlateSplines_smooth_overfit_fit, newdata = ThinPlateSplines_overfit_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = ThinPlateSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+#Using regularization
+
+```{r}
+minimize_error_func <- function(beta, my_info){
+  basis_mat = my_info$basis_mat
+  
+  response_vec = my_info$yobs
+  
+  lambda = my_info$lambda
+  
+  penalty_mat = my_info$penalty_mat
+  
+  linear_pred = as.vector(basis_mat %*% as.matrix(beta))
+  
+  sum_of_squares = sum((response_vec - linear_pred) ^ 2)
+  
+  penalty = t(as.matrix(beta)) %*% (penalty_mat %*% as.matrix(beta))
+  
+  objective = sum_of_squares + lambda * penalty
+
+  objective  
+}
+```
+
+```{r}
+ThinPlateSplines_fit_func_Reg <- function(df_1, data, lambda){
+  Smooth <- smoothCon(s(x1, k=df_1, bs = 'ts'), data = data)[[1]]
+  Smooth_basis <- Smooth$X
+  Smooth_penalty <- Smooth$S
+  
+  info_list <- list(
+    yobs = data$y, 
+    basis_mat = as.matrix(Smooth_basis %>% as.data.frame() %>% tbl_df()),
+    penalty_mat = as.matrix(Smooth_penalty %>% as.data.frame() %>% tbl_df()),
+    lambda = lambda
+  )
+  
+  start_guess = rnorm(n = ncol(info_list$basis_mat), mean = 0, sd = 2)
+  
+  fit <- optim(start_guess,
+               minimize_error_func,
+               gr = NULL,
+               info_list,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = 1, maxit = 1001))
+  
+  return(list("fit" = fit, "Smooth" = Smooth))
+}
+```
+
+
+```{r}
+ThinPlateSplines_reg <- ThinPlateSplines_fit_func_Reg(25, train_df_1d, 0.0001)
+#ThinPlateSplines_reg$fit
+```
+
+```{r, eval=TRUE}
+ThinPlateSplines_reg_test_basis_df <- PredictMat(ThinPlateSplines_reg$Smooth, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+ThinPlateSplines_reg_test_pred <- as.matrix(ThinPlateSplines_reg_test_basis_df)  %*% as.matrix(ThinPlateSplines_reg$fit$par)
+# ThinPlateSplines_reg_test_pred
+```
+
+```{r}
+ThinPlateSplines_reg$fit$par - 2 * sqrt(diag(ThinPlateSplines_reg$fit$hessian))
+ThinPlateSplines_reg$fit$par + 2 * sqrt(diag(ThinPlateSplines_reg$fit$hessian))
+```
+
+
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = ThinPlateSplines_reg_test_pred) %>%
+  mutate(y_pred_unreg = ThinPlateSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_unreg), color = 'blue') +
+  
+  
+  
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = ThinPlateSplines_reg_test_pred) %>%
+  mutate(y_pred_AIC = ThinPlateSplines_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_AIC), color = 'orange', size = 1.0, linetype = 'dashed') +
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+
+
+# Penalized Cubic Regression splines
+
+```{r}
+CubicSplines_fit_func_No_Reg <- function(df_1, data){
+  model <- lm(y ~ smoothCon(s(x1, k=df_1, bs = 'cc'), data = data)[[1]]$X - 1, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1)
+  return(metrics)
+}
+```
+
+
+```{r}
+df_grid_cubic<-  list(x1 = c(5:18)) %>% as.data.frame() %>% tbl_df()
+df_grid_cubic
+```
+
+```{r}
+CubicSplines_comp_fit <- map_dfr(df_grid_cubic$x1, CubicSplines_fit_func_No_Reg, data = train_df_1d)
+CubicSplines_comp_fit
+```
+
+
+```{r, eval = TRUE}
+df_best_CubicSplines_AIC <- CubicSplines_comp_fit %>% filter(AIC == min(AIC)) %>% select(df_1)
+df_best_CubicSplines_AIC
+```
+
+```{r}
+CubicSplines_smooth_Best_AIC = smoothCon(s(x1, k=df_best_CubicSplines_AIC$df_1, bs = 'cc'), data = train_df_1d)[[1]]
+CubicSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+CubicSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+CubicSplines_train_df <- CubicSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+CubicSplines_smooth_Best_AIC_fit <- lm(y ~ . - 1, data = CubicSplines_train_df)
+CubicSplines_smooth_Best_AIC_fit %>% summary()
+coefplot::coefplot(CubicSplines_smooth_Best_AIC_fit) + theme_bw()
+CubicSplines_smooth_Best_AIC_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+CubicSplines_test_basis_df <- PredictMat(CubicSplines_smooth_Best_AIC, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+CubicSplines_test_pred <- predict(CubicSplines_smooth_Best_AIC_fit, newdata = CubicSplines_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = CubicSplines_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# Overfitted cubicSplines model
+
+```{r}
+CubicSplines_smooth_overfit = smoothCon(s(x1, k=30, bs = 'cc'), data = train_df_1d)[[1]]
+CubicSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+CubicSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+CubicSplines_overfit_train_df <- CubicSplines_smooth_overfit$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+CubicSplines_smooth_overfit_fit <- lm(y ~ . - 1, data = CubicSplines_overfit_train_df)
+CubicSplines_smooth_overfit_fit %>% summary()
+coefplot::coefplot(CubicSplines_smooth_overfit_fit) + theme_bw()
+CubicSplines_smooth_overfit_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+CubicSplines_overfit_test_basis_df <- PredictMat(CubicSplines_smooth_overfit, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+CubicSplines_overfit_test_pred <- predict(CubicSplines_smooth_overfit_fit, newdata = CubicSplines_overfit_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = CubicSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+#Using regularization
+
+
+```{r}
+CubicSplines_fit_func_Reg <- function(df_1, data, lambda){
+  Smooth <- smoothCon(s(x1, k=df_1, bs = 'cc'), data = data)[[1]]
+  Smooth_basis <- Smooth$X
+  Smooth_penalty <- Smooth$S
+  
+  info_list <- list(
+    yobs = data$y, 
+    basis_mat = as.matrix(Smooth_basis %>% as.data.frame() %>% tbl_df()),
+    penalty_mat = as.matrix(Smooth_penalty %>% as.data.frame() %>% tbl_df()),
+    lambda = lambda
+  )
+  
+  start_guess = rnorm(n = ncol(info_list$basis_mat), mean = 0, sd = 2)
+  
+  fit <- optim(start_guess,
+               minimize_error_func,
+               gr = NULL,
+               info_list,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = 1, maxit = 1001))
+  
+  return(list("fit" = fit, "Smooth" = Smooth))
+}
+```
+
+
+```{r}
+CubicSplines_reg <- CubicSplines_fit_func_Reg(30, train_df_1d, 2.0)
+```
+
+```{r, eval=TRUE}
+CubicSplines_reg_test_basis_df <- PredictMat(CubicSplines_reg$Smooth, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+CubicSplines_reg_test_pred <- as.matrix(CubicSplines_reg_test_basis_df)  %*% as.matrix(CubicSplines_reg$fit$par)
+```
+
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = CubicSplines_reg_test_pred) %>%
+  mutate(y_pred_unreg = CubicSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_unreg), color = 'blue') +
+  
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+# Tensor Smooth splines
+
+```{r}
+TensorSplines_fit_func_No_Reg <- function(df_1, data){
+  model <- lm(y ~ smoothCon(ti(x1, k=df_1, bs = 'cs'), data = data)[[1]]$X - 1, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1)
+  return(metrics)
+}
+```
+
+
+```{r}
+df_grid_tensor<-  list(x1 = c(5:18)) %>% as.data.frame() %>% tbl_df()
+df_grid_tensor
+```
+
+```{r}
+TensorSplines_comp_fit <- map_dfr(df_grid_tensor$x1, TensorSplines_fit_func_No_Reg, data = train_df_1d)
+TensorSplines_comp_fit
+```
+
+```{r, eval = TRUE}
+df_best_TensorSplines_AIC <- TensorSplines_comp_fit %>% filter(AIC == min(AIC)) %>% select(df_1)
+df_best_TensorSplines_AIC
+```
+
+```{r}
+TensorSplines_smooth_Best_AIC = smoothCon(ti(x1, k=df_best_TensorSplines_AIC$df_1, bs = 'cs'), data = train_df_1d)[[1]]
+TensorSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+TensorSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+TensorSplines_train_df <- TensorSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+TensorSplines_smooth_Best_AIC_fit <- lm(y ~ . - 1, data = TensorSplines_train_df)
+TensorSplines_smooth_Best_AIC_fit %>% summary()
+coefplot::coefplot(TensorSplines_smooth_Best_AIC_fit) + theme_bw()
+TensorSplines_smooth_Best_AIC_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+TensorSplines_test_basis_df <- PredictMat(TensorSplines_smooth_Best_AIC, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+TensorSplines_test_pred <- predict(TensorSplines_smooth_Best_AIC_fit, newdata = TensorSplines_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = TensorSplines_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# Overfitted TensorSplines model
+
+```{r}
+TensorSplines_smooth_overfit = smoothCon(ti(x1, k=30, bs = 'cs'), data = train_df_1d)[[1]]
+TensorSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+TensorSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+TensorSplines_overfit_train_df <- TensorSplines_smooth_overfit$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+TensorSplines_smooth_overfit_fit <- lm(y ~ . - 1, data = TensorSplines_overfit_train_df)
+TensorSplines_smooth_overfit_fit %>% summary()
+coefplot::coefplot(TensorSplines_smooth_overfit_fit) + theme_bw()
+TensorSplines_smooth_overfit_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+TensorSplines_overfit_test_basis_df <- PredictMat(TensorSplines_smooth_overfit, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+TensorSplines_overfit_test_pred <- predict(TensorSplines_smooth_overfit_fit, newdata = TensorSplines_overfit_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = TensorSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+
+#Using regularization
+
+
+```{r}
+TensorSplines_fit_func_Reg <- function(df_1, data, lambda){
+  Smooth <- smoothCon(ti(x1, k=df_1, bs = 'cs'), data = data)[[1]]
+  Smooth_basis <- Smooth$X
+  Smooth_penalty <- Smooth$S
+  
+  info_list <- list(
+    yobs = data$y, 
+    basis_mat = as.matrix(Smooth_basis %>% as.data.frame() %>% tbl_df()),
+    penalty_mat = as.matrix(Smooth_penalty %>% as.data.frame() %>% tbl_df()),
+    lambda = lambda
+  )
+  
+  start_guess = rnorm(n = ncol(info_list$basis_mat), mean = 0, sd = 2)
+  
+  fit <- optim(start_guess,
+               minimize_error_func,
+               gr = NULL,
+               info_list,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = 1, maxit = 1001))
+  
+  return(list("fit" = fit, "Smooth" = Smooth))
+}
+```
+
+
+```{r}
+TensorSplines_reg <- TensorSplines_fit_func_Reg(30, train_df_1d, 1.0)
+```
+
+```{r, eval=TRUE}
+TensorSplines_reg_test_basis_df <- PredictMat(TensorSplines_reg$Smooth, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+TensorSplines_reg_test_pred <- as.matrix(TensorSplines_reg_test_basis_df)  %*% as.matrix(TensorSplines_reg$fit$par)
+```
+
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = TensorSplines_reg_test_pred) %>%
+  mutate(y_pred_unreg = TensorSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_unreg), color = 'blue') +
+  
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+# P-Splines Smooths
+
+```{r}
+PSplines_fit_func_No_Reg <- function(df_1, data){
+  model <- lm(y ~ smoothCon(s(x1, k=df_1, bs = 'ps'), data = data)[[1]]$X - 1, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1)
+  return(metrics)
+}
+```
+
+
+```{r}
+df_grid_psplines<-  list(x1 = c(5:18)) %>% as.data.frame() %>% tbl_df()
+df_grid_psplines
+```
+
+```{r}
+PSplines_comp_fit <- map_dfr(df_grid_psplines$x1, PSplines_fit_func_No_Reg, data = train_df_1d)
+PSplines_comp_fit
+```
+
+```{r, eval = TRUE}
+df_best_PSplines_AIC <- PSplines_comp_fit %>% filter(AIC == min(AIC)) %>% select(df_1)
+df_best_PSplines_AIC
+```
+
+```{r}
+PSplines_smooth_Best_AIC = smoothCon(s(x1, k=df_best_PSplines_AIC$df_1, bs = 'ps'), data = train_df_1d)[[1]]
+PSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+PSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+PSplines_train_df <- PSplines_smooth_Best_AIC$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+PSplines_smooth_Best_AIC_fit <- lm(y ~ . - 1, data = PSplines_train_df)
+PSplines_smooth_Best_AIC_fit %>% summary()
+coefplot::coefplot(PSplines_smooth_Best_AIC_fit) + theme_bw()
+PSplines_smooth_Best_AIC_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+PSplines_test_basis_df <- PredictMat(PSplines_smooth_Best_AIC, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+PSplines_test_pred <- predict(PSplines_smooth_Best_AIC_fit, newdata = PSplines_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = PSplines_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# Overfitted PSplines model
+
+```{r}
+PSplines_smooth_overfit = smoothCon(s(x1, k=30, bs = 'ps'), data = train_df_1d)[[1]]
+PSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble()
+```
+
+```{r}
+PSplines_smooth_overfit$X %>% as.data.frame() %>% tibble::as_tibble() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r, eval=TRUE}
+PSplines_overfit_train_df <- PSplines_smooth_overfit$X %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+PSplines_smooth_overfit_fit <- lm(y ~ . - 1, data = PSplines_overfit_train_df)
+PSplines_smooth_overfit_fit %>% summary()
+coefplot::coefplot(PSplines_smooth_overfit_fit) + theme_bw()
+PSplines_smooth_overfit_fit %>% glance()
+```
+
+# Prediction
+
+```{r, eval=TRUE}
+PSplines_overfit_test_basis_df <- PredictMat(PSplines_smooth_overfit, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+PSplines_overfit_test_pred <- predict(PSplines_smooth_overfit_fit, newdata = PSplines_overfit_test_basis_df)
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = PSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+#Using regularization
+
+
+```{r}
+PSplines_fit_func_Reg <- function(df_1, data, lambda){
+  Smooth <- smoothCon(s(x1, k=df_1, bs = 'ps'), data = data)[[1]]
+  Smooth_basis <- Smooth$X
+  Smooth_penalty <- Smooth$S
+  
+  info_list <- list(
+    yobs = data$y, 
+    basis_mat = as.matrix(Smooth_basis %>% as.data.frame() %>% tbl_df()),
+    penalty_mat = as.matrix(Smooth_penalty %>% as.data.frame() %>% tbl_df()),
+    lambda = lambda
+  )
+  
+  start_guess = rnorm(n = ncol(info_list$basis_mat), mean = 0, sd = 2)
+  
+  fit <- optim(start_guess,
+               minimize_error_func,
+               gr = NULL,
+               info_list,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = 1, maxit = 1001))
+  
+  return(list("fit" = fit, "Smooth" = Smooth))
+}
+```
+
+
+```{r}
+PSplines_reg <- PSplines_fit_func_Reg(30, train_df_1d, 1.5)
+```
+
+```{r, eval=TRUE}
+PSplines_reg_test_basis_df <- PredictMat(PSplines_reg$Smooth, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+PSplines_reg_test_pred <- as.matrix(PSplines_reg_test_basis_df)  %*% as.matrix(PSplines_reg$fit$par)
+```
+
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = PSplines_reg_test_pred) %>%
+  mutate(y_pred_unreg = PSplines_overfit_test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_unreg), color = 'blue') +
+  
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
