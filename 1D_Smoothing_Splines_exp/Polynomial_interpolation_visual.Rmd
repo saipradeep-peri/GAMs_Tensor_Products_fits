@@ -1,0 +1,57 @@
+---
+title: "Polynomial_interpolation_visual"
+author: "Sai Pradeep Peri"
+date: "3/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(ggplot2)
+library(polynom)
+library(dplyr)
+```
+
+```{r}
+x = seq(-1,1, by = 0.2)
+x
+
+#The below is the runge function
+y = 1/(1+25*x^2)
+y
+```
+
+```{r}
+dat = data.frame(x = x, y = y)
+dat
+```
+
+```{r}
+#polynomial interpolation function calculation
+poly.calc(x, y)
+```
+
+```{r}
+#This is the runge function calculation
+y_func <- function(x){
+  return(1/(1+25*x^2))
+}
+
+#The polynomial interpolation function calculated above
+polynomial_interpolant <- function(x, y){
+  return(1 - 16.8552*x^2 + 123.3597*x^4 - 381.4338*x^6 + 494.9095*x^8 - 220.9417*x^10)
+}
+
+
+dat %>% ggplot(mapping = aes(x = x, y = y)) +
+  geom_point(size=3) +
+  geom_function(fun = y_func, color = 'blue') +
+  geom_function(fun = polynomial_interpolant, colour = "red") +
+  ggtitle("Equal Spacing n = 11") +
+  theme_bw()
+```
