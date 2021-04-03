@@ -1,0 +1,274 @@
+---
+title: "Tensor_splines_New_data"
+author: "Sai Pradeep Peri"
+date: "9/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+Lets initialize a 2D mesh grid points with a specific range.
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 100
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+```{r}
+fine_grid <- expand.grid(fine_grid_list, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+fine_grid
+```
+
+First we will look at the method of natural splines ns() and build groud truth tensor spline using the kronecker product of two spline interaction -> ns():ns(). This build tensor product splines in 2- dimension
+
+```{r}
+library(splines)
+fine_basis_mat <- model.matrix(~ ns(x1, df = 11):ns(x2, df=7), data = fine_grid)
+colnames(fine_basis_mat) 
+```
+
+Lets initialize a true beta values based on normal distribution.
+
+```{r}
+set.seed(123423)
+beta_true <- rnorm(n = ncol(fine_basis_mat), mean = 0, sd = 2)
+#beta_true
+```
+
+```{r}
+fine_basis_mat %>% as.data.frame() %>% bind_cols(fine_grid) %>% select(-`(Intercept)`) %>% 
+  tidyr::gather(key = "key", value = "value", -x1, -x2) %>%
+  tidyr::separate(key,
+                  c("x1_full_name", "x2_full_name"),
+                  sep = ":") %>% 
+  tidyr::separate(x1_full_name,
+                  c("x1_extra", "x1_basis"),
+                  sep = "\\)") %>% 
+  tidyr::separate(x2_full_name,
+                  c("x2_extra", "x2_basis"),
+                  sep = "\\)") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_grid(x2_basis~x1_basis, labeller = "label_both") +
+  scale_fill_viridis_c() +
+  theme_bw() 
+```
+
+The above visual shows the basis functions of the tensor product splines. These can be assumed as the 2D filters denoting a 2D response surface.
+
+```{r}
+mean_trend_true <- as.numeric(fine_basis_mat %*% as.matrix(beta_true))
+```
+
+Below we can see the response surface after multpiplying betas with the basis matrix.
+
+```{r}
+fine_grid %>% mutate(mu = mean_trend_true) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = mu)) +
+  scale_fill_viridis_c()
+```
+
+Lets add some noise and see if we can predict the response surface using linear models.
+
+```{r}
+set.seed(5467546)
+noisy_mean_trend <- rnorm(n = length(mean_trend_true), mean = mean_trend_true, sd = 0.3)
+#noisy_mean_trend
+```
+
+
+```{r}
+fine_grid %>% mutate(y = noisy_mean_trend) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = y)) +
+  scale_fill_viridis_c()
+```
+
+```{r}
+noisy_df <- fine_grid %>% mutate(y = noisy_mean_trend)
+#noisy_df
+```
+
+Use coarse grid as the training data and can use the remaining values for testing.
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 50
+
+coarse_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_coarse_int+1),
+  x2 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid_list
+```
+
+```{r, eval=TRUE}
+coarse_grid <- expand.grid(coarse_grid_list,
+                           KEEP.OUT.ATTRS = FALSE,
+                           stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df()
+#coarse_grid
+```
+
+```{r,eval=TRUE}
+train_df <- noisy_df %>% 
+  right_join(coarse_grid, by = c("x1", "x2"))
+
+train_df %>% count(x1)
+
+train_df %>% count(x2)
+
+#train_df
+```
+
+The below visual shows the train data surface which is noisy. 
+```{r}
+train_df %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = y)) +
+  scale_fill_viridis_c()
+```
+
+
+The advantage of building the basis functions before hand is that we can now represent them as linear models. 
+
+```{r}
+tensor_spline_mod <- lm(y ~ ns(x1, df = 2):ns(x2, df =5), data = train_df)
+tensor_spline_mod %>% summary()
+coefplot::coefplot(tensor_spline_mod) + theme_bw()
+```
+
+
+```{r}
+library(broom)
+```
+
+```{r}
+glance(tensor_spline_mod)
+```
+
+```{r}
+model_fit_func <- function(df_x1, df_x2, data){
+  model <- lm(y ~ ns(x1, df = df_x1):ns(x2, df=df_x2), data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_x1, df_2 = df_x2)
+  return(metrics)
+}
+```
+
+We will use a grid of df's for both x1 and x2 and use the best AIC score to find the optimized degree's of freedom.
+
+```{r}
+degree_of_freedom_grid <- expand.grid(x1 = 2:12, x2 = 2:12, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+degree_of_freedom_grid
+```
+
+```{r}
+library(purrr)
+```
+
+```{r}
+model_comp_df <- map2_dfr(degree_of_freedom_grid$x1,degree_of_freedom_grid$x2, model_fit_func, data = noisy_df)
+```
+
+```{r}
+model_comp_df %>% 
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC))
+```
+
+```{r}
+model_comp_df %>% arrange(AIC) %>% mutate(AIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC)) +
+  geom_text(mapping = aes(label = AIC_rank), color = "white") 
+```
+
+From the above visual we can see the best model based on AIC score as (x1, x2) -> (7, 11) which is the ground truth complexity of the response we created. So, we can see this method works in modeling the higher dimensional surfaces in correctly identifying the complexity too.
+
+```{r}
+model_comp_df %>% arrange(BIC) %>% mutate(BIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = BIC)) +
+  geom_text(mapping = aes(label = BIC_rank), color = "white") 
+```
+
+
+```{r, eval=TRUE}
+df_best_AIC_model <- model_comp_df %>% filter(AIC == min(AIC)) %>% select(df_1, df_2)
+```
+
+```{r, eval=TRUE}
+best_AIC_fit <- lm(y ~ ns(x1, df = df_best_AIC_model$df_1):ns(x2, df=df_best_AIC_model$df_2), data = train_df)
+best_AIC_fit %>% summary()
+coefplot::coefplot(best_AIC_fit) + theme_bw()
+```
+
+```{r, eval=TRUE}
+pred_df <- noisy_df %>% 
+  anti_join(coarse_grid, by = c("x1", "x2"))
+```
+
+
+```{r, eval=TRUE}
+prediction <- predict(best_AIC_fit, pred_df, se.fit = TRUE) %>%  as.data.frame() %>% tbl_df()
+```
+
+
+```{r, eval=TRUE}
+pred_df %>% mutate(pred_fit = prediction$fit) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = pred_fit)) +
+  scale_fill_viridis_c()
+```
+
+```{r, eval=TRUE}
+prediction_total_data <- predict(best_AIC_fit, noisy_df, se.fit = TRUE) %>%  as.data.frame() %>% tbl_df()
+fine_grid %>% mutate(pred_fit = prediction_total_data$fit) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = pred_fit)) +
+  scale_fill_viridis_c()
+```
+
+The above figure shows the prediction on the whole data.
+
+```{r, eval=TRUE}
+library(Metrics)
+fine_grid %>% mutate(mse = (mean_trend_true - prediction_total_data$fit)^2) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = mse)) +
+  scale_fill_gradient(low = 'white', high = 'blue')
+```
+
+```{r, eval=TRUE}
+library(Metrics)
+fine_grid %>% mutate(se = (mean_trend_true - prediction_total_data$fit)) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = se)) +
+  scale_fill_gradient2(low = 'red', mid = 'white', high = 'blue')
+```
+
+The above two code blocks shows the MAE nad RMSE visuals. We can see the error is not too high in comparison of scale.
+
+Above we used a 25 * 25 grid for training and interpolated on 100 * 100 grid. This method shows that Tensor splines can interpolate on image snapshot type data. 
+
+
+
+
+

@@ -1,0 +1,758 @@
+---
+title: "Tensor_splines_GAM's_basis_linear_fit"
+author: "Sai Pradeep Peri"
+date: "10/24/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, eval=TRUE}
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(broom)
+library(splines)
+library(purrr)
+```
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 40
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+```{r, eval=TRUE}
+### set the true relationships per factor
+
+### set the functional expressions
+
+true_functions <- list(
+  g1 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)},
+  g2 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)}
+)
+
+### set the parameters of the functions
+true_hypers <- list(
+  g1 = list(a0 = 0, a1 = 1, a2 = 1),
+  g2 = list(a0 = 0, a1 = 1, a2 = 1)
+)
+```
+
+
+```{r, eval=TRUE}
+### define a wrapper function for executing the functions
+run_factors <- function(myfunc, myx, myparams)
+{
+  myfunc(myx, myparams)
+}
+```
+
+```{r, eval=TRUE}
+### calculate each of the factors over the fine grid
+fine_true_factors <- purrr::pmap(list(true_functions,
+                                      fine_grid_list,
+                                      true_hypers),
+                                 run_factors)
+
+fine_true_factors
+```
+
+```{r, eval=TRUE}
+fine_true_latent_dfs <- purrr::pmap(list(fine_grid_list,
+                                         fine_true_factors,
+                                         1:2),
+                                    function(x, g, glabel){tibble::tibble(x = x, g = g) %>% 
+                                        purrr::set_names(c(sprintf("x%d", glabel),
+                                                           sprintf("g%d", glabel))) %>% 
+                                        tibble::rowid_to_column(sprintf("x%d_id", glabel))})
+
+fine_true_latent_dfs
+```
+
+```{r, eval=TRUE}
+### create the tensor product of the two factors
+fine_latent_tensor <- expand.grid(fine_grid_list,
+            KEEP.OUT.ATTRS = FALSE,
+            stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df() %>% 
+  left_join(fine_true_latent_dfs[[1]], by = "x1") %>% 
+  left_join(fine_true_latent_dfs[[2]], by = "x2") %>% 
+  select(ends_with("_id"), x1:x2, g1, g2) %>% 
+  tibble::rowid_to_column("fine_id")
+fine_latent_tensor
+```
+
+```{r, eval=TRUE}
+### visualize the product of the two factors
+fine_latent_tensor %>% 
+  count(x1, x2, g1, g2) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = g1 * g2)) +
+  coord_equal() +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r, eval = TRUE}
+### visualize the sum of the all 2 factors
+fine_latent_tensor %>% 
+  mutate(go = g1 * g2) %>% 
+  ggplot(mapping = aes(x = x1, y = go)) +
+  geom_line() +
+  facet_wrap(~x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+```{r, eval=TRUE}
+### generate the noisy observations
+sd_noise <- 0.1 # noise
+
+set.seed(813123)
+fine_df <- fine_latent_tensor %>% 
+  mutate(go = g1 * g2,
+         y = rnorm(n = n(), mean = go, sd = sd_noise))
+
+fine_df
+```
+
+```{r, eval=TRUE}
+### look at the fine grid noisy data in log space
+fine_df %>% 
+  ggplot(mapping = aes(x = x1, y = y)) +
+  geom_point() +
+  facet_wrap(~x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+```{r}
+fine_df %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  coord_equal() +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 20
+
+coarse_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_coarse_int+1),
+  x2 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid_list
+```
+
+```{r, eval=TRUE}
+coarse_grid <- expand.grid(coarse_grid_list,
+                           KEEP.OUT.ATTRS = FALSE,
+                           stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df()
+coarse_grid
+```
+
+```{r,eval=TRUE}
+train_df <- fine_df %>% 
+  right_join(coarse_grid, by = c("x1", "x2"))
+
+train_df
+```
+
+```{r, eval=TRUE}
+### look at the true latent function in the log-space with respect to x2
+train_df %>% 
+  ggplot(mapping = aes(x = x1, y = go)) +
+  geom_line() +
+  geom_point(mapping = aes(y = y), color = "red") +
+  facet_wrap(~ x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+```{r}
+train_df %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  coord_equal() +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+# The original fit stats
+
+````{r}
+Interact_cosine_model <- lm(y ~ g1:g2, data = train_df)
+Interact_cosine_model %>% glance()
+````
+
+# extracting basis functions from GAM's smooths
+
+# Fitting extracted basis of SmoothCon using lm()
+
+```{r}
+model_gam_basis_linear_fit_func_interact <- function(df_1, df_2, data){
+  model <- lm(y ~ smoothCon(ti(x1, x2, k=c(df_1,df_2)), data = data)[[1]]$X, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2)
+  return(metrics)
+}
+```
+
+```{r}
+df_grid_interact<- expand.grid(x1 = 5:17, x2 = 5:17, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+df_grid_interact
+```
+
+```{r}
+model_comp_gam_basis_interact <- map2_dfr(df_grid_interact$x1, df_grid_interact$x2, model_gam_basis_linear_fit_func_interact, data = train_df)
+```
+
+
+```{r}
+model_comp_gam_basis_interact %>% arrange(AIC) %>% mutate(AIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC)) +
+  geom_text(mapping = aes(label = AIC_rank), color = "white") 
+```
+
+```{r}
+model_comp_gam_basis_interact %>% arrange(BIC) %>% mutate(BIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = BIC)) +
+  geom_text(mapping = aes(label = BIC_rank), color = "white") 
+```
+# best model based on AIC fit
+
+```{r, eval=TRUE}
+df_best_gam_basis_interact_AIC <- model_comp_gam_basis_interact%>% filter(AIC == min(AIC)) %>% select(df_1, df_2)
+df_best_gam_basis_interact_AIC
+```
+
+
+```{r, eval=TRUE}
+sm_interact_ti_AIC = smoothCon(ti(x1, x2, k=c(df_best_gam_basis_interact_AIC$df_1,df_best_gam_basis_interact_AIC$df_2)), data = train_df)[[1]]
+#sm_full_ti$X
+```
+
+```{r, eval=TRUE}
+sm_interact_ti_AIC$X %>% as.data.frame() %>% tbl_df() %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  mutate(id = factor(key, levels = as.vector(unique(key)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+```{r, eval=TRUE}
+gam_basis_linear_fit_AIC <- lm(y ~ sm_interact_ti_AIC$X, data = train_df)
+gam_basis_linear_fit_AIC %>% summary()
+coefplot::coefplot(gam_basis_linear_fit_AIC) + theme_bw()
+```
+
+# best model based on BIC fit
+
+```{r, eval=TRUE}
+df_best_gam_basis_interact_BIC <- model_comp_gam_basis_interact%>% filter(BIC == min(BIC)) %>% select(df_1, df_2)
+df_best_gam_basis_interact_BIC
+```
+
+
+```{r, eval=TRUE}
+sm_interact_ti_BIC = smoothCon(ti(x1, x2, k=c(df_best_gam_basis_interact_BIC$df_1,df_best_gam_basis_interact_BIC$df_2)), data = train_df)[[1]]
+#sm_full_ti$X
+```
+
+```{r, eval=TRUE}
+sm_interact_ti_BIC$X %>% as.data.frame() %>% tbl_df() %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  mutate(id = factor(key, levels = as.vector(unique(key)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+gam_basis_linear_fit_BIC <- lm(y ~ sm_interact_ti_BIC$X, data = train_df)
+gam_basis_linear_fit_BIC %>% summary()
+coefplot::coefplot(gam_basis_linear_fit_BIC) + theme_bw()
+```
+
+
+# Using gam function from mgcv package
+
+```{r}
+gam_fit_func_interact <- function(df_1, df_2, data){
+  model <- gam(y ~ ti(x1, x2, k=c(df_1,df_2)), data = data, method = 'REML')
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2)
+  return(metrics)
+}
+```
+
+```{r}
+gam_model_comp_interact <- map2_dfr(df_grid_interact$x1, df_grid_interact$x2, gam_fit_func_interact, data = train_df)
+```
+
+```{r}
+gam_model_comp_interact %>% arrange(AIC) %>% mutate(AIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC)) +
+  geom_text(mapping = aes(label = AIC_rank), color = "white") 
+```
+
+```{r}
+gam_model_comp_interact %>% arrange(BIC) %>% mutate(BIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = BIC)) +
+  geom_text(mapping = aes(label = BIC_rank), color = "white") 
+```
+
+
+# Best fit based on AIC (problem here is the best model changes based on the grid space when the grid was between 5:15 the best model was 12,14 now the model changes to 16,12 and when I am using grid space of 5:20 the best model is 20,20 where as the BIC is constant around best model of 9,9)
+
+```{r, eval=TRUE}
+gam_best_AIC_model_interact <- gam_model_comp_interact%>% filter(AIC == min(AIC)) %>% select(df_1, df_2)
+gam_best_AIC_model_interact
+```
+
+```{r, eval=TRUE}
+gam_best_model_fit_interact_ti_AIC <- gam(y ~ ti(x1, x2, k=c(gam_best_AIC_model_interact$df_1[1],gam_best_AIC_model_interact$df_2[1])), data = train_df, method = 'REML')
+summary(gam_best_model_fit_interact_ti_AIC)
+gam_best_model_fit_interact_ti_AIC
+```
+
+# Best fit based on BIC
+```{r, eval=TRUE}
+gam_best_BIC_model_interact <- gam_model_comp_interact%>% filter(BIC == min(BIC)) %>% select(df_1, df_2)
+gam_best_BIC_model_interact
+```
+
+```{r, eval=TRUE}
+gam_best_model_fit_interact_ti_BIC <- gam(y ~ ti(x1, x2, k=c(gam_best_BIC_model_interact$df_1[1],gam_best_BIC_model_interact$df_2[1])), data = train_df, method = 'REML')
+summary(gam_best_model_fit_interact_ti_BIC)
+gam_best_model_fit_interact_ti_BIC
+```
+
+
+# Interaction fit using linear models and ns() basis functions
+
+```{r}
+model_fit_func_interact <- function(df_1, df_2, data){
+  model <- lm(y ~ ns(x1, df = df_1):ns(x2, df=df_2), data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2)
+  return(metrics)
+}
+```
+
+```{r}
+model_comp_df_interact <- map2_dfr(df_grid_interact$x1, df_grid_interact$x2, model_fit_func_interact, data = train_df)
+```
+
+```{r}
+model_comp_df_interact %>% arrange(AIC) %>% mutate(AIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC)) +
+  geom_text(mapping = aes(label = AIC_rank), color = "white") 
+```
+
+```{r}
+model_comp_df_interact %>% arrange(BIC) %>% mutate(BIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = BIC)) +
+  geom_text(mapping = aes(label = BIC_rank), color = "white") 
+```
+
+# Best AIC fit
+
+```{r, eval=TRUE}
+df_best_AIC_model_interact <- model_comp_df_interact%>% filter(AIC == min(AIC)) %>% select(df_1, df_2)
+df_best_AIC_model_interact
+```
+
+
+```{r, eval=TRUE}
+best_AIC_fit_interact <- lm(y ~ ns(x1, df = df_best_AIC_model_interact$df_1[1]):ns(x2, df=df_best_AIC_model_interact$df_2[1]), data = train_df)
+best_AIC_fit_interact %>% summary()
+coefplot::coefplot(best_AIC_fit_interact) + theme_bw()
+```
+```{r}
+### interaction effects on the coarse grid
+model.matrix( ~ ns(x1, df = df_best_AIC_model_interact$df_1[1]):ns(x2, df=df_best_AIC_model_interact$df_2[1]), train_df)  %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(!is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_x1_word", "x1_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  tidyr::separate(right_word,
+                  c("ns_x2_word", "x2_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_grid(x1_s_id ~ x2_s_id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+
+# Best BIC fit
+
+```{r, eval=TRUE}
+df_best_BIC_model_interact <- model_comp_df_interact%>% filter(BIC == min(BIC)) %>% select(df_1, df_2)
+df_best_BIC_model_interact
+```
+
+
+```{r, eval=TRUE}
+best_BIC_fit_interact <- lm(y ~ ns(x1, df = df_best_BIC_model_interact$df_1[1]):ns(x2, df=df_best_BIC_model_interact$df_2[1]), data = train_df)
+best_BIC_fit_interact %>% summary()
+coefplot::coefplot(best_BIC_fit_interact) + theme_bw()
+```
+
+```{r}
+### interaction effects on the coarse grid
+model.matrix( ~ ns(x1, df = df_best_BIC_model_interact$df_1[1]):ns(x2, df=df_best_BIC_model_interact$df_2[1]), train_df)  %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(!is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_x1_word", "x1_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  tidyr::separate(right_word,
+                  c("ns_x2_word", "x2_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_grid(x1_s_id ~ x2_s_id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+## Full model Interaction + marginal effects
+
+
+# Starting with gam basis using smooths
+
+```{r}
+df_grid_full<- expand.grid(x1 = 0:10, x2 = 0:10, x3 = 7:15, x4 = 7:15, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+df_grid_full
+```
+
+```{r}
+model_gam_basis_linear_fit_func_full <- function(df_1, df_2, df_3, df_4, data){
+  sm_marginal_ti_x1 <- smoothCon(ti(x1, k = df_1), data = train_df)[[1]]
+  sm_marginal_ti_x2 <- smoothCon(ti(x2, k = df_2), data = train_df)[[1]]
+  sm_interact_ti_x1_x2 <- smoothCon(ti(x1, x2, k=c(df_3,df_4)), data = train_df)[[1]]
+  design_mat <- cbind(sm_marginal_ti_x1$X, sm_marginal_ti_x2$X, sm_interact_ti_x1_x2$X)
+  model <- lm(y ~ design_mat, data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2, df_3 = df_3, df_4 = df_4)
+  return(metrics)
+}
+```
+
+```{r}
+df_list_full <- list(df_grid_full$x1, df_grid_full$x2, df_grid_full$x3, df_grid_full$x4)
+model_comp_gam_basis_full <- pmap_dfr(df_list_full, model_gam_basis_linear_fit_func_full, data = train_df)
+```
+
+```{r}
+model_comp_gam_basis_full[order(model_comp_gam_basis_full$AIC),] %>% select(df_1, df_2, df_3, df_4, AIC)
+```
+
+```{r}
+model_comp_gam_basis_full[order(model_comp_gam_basis_full$BIC),] %>% select(df_1, df_2, df_3, df_4, BIC)
+```
+
+# best fit based on AIC
+
+```{r, eval=TRUE}
+df_best_gam_basis_full_AIC <- model_comp_gam_basis_full%>% filter(AIC == min(AIC)) %>% select(df_1, df_2, df_3, df_4, AIC)
+df_best_gam_basis_full_AIC
+```
+
+
+```{r, eval=TRUE}
+sm_marginal_AIC_ti_x1 <- smoothCon(ti(x1, k = df_best_gam_basis_full_AIC$df_1[1]), data = train_df)[[1]]$X
+colnames(sm_marginal_AIC_ti_x1) <- sprintf("x1_s%02d", 1:ncol(sm_marginal_AIC_ti_x1))
+colnames(sm_marginal_AIC_ti_x1)
+```
+
+
+```{r, eval=TRUE}
+sm_marginal_AIC_ti_x2 <- smoothCon(ti(x2, k = df_best_gam_basis_full_AIC$df_2[1]), data = train_df)[[1]]$X
+colnames(sm_marginal_AIC_ti_x2) <- sprintf("x2_s%02d", 1:ncol(sm_marginal_AIC_ti_x2))
+colnames(sm_marginal_AIC_ti_x2)
+```
+
+```{r, eval=TRUE}
+sm_interact_AIC_ti_x1_x2 <- smoothCon(ti(x1, x2, k = c(df_best_gam_basis_full_AIC$df_3[1],df_best_gam_basis_full_AIC$df_4[1])), data = train_df)[[1]]$X
+colnames(sm_interact_AIC_ti_x1_x2) <- sprintf("x1:x2_s%02d", 1:ncol(sm_interact_AIC_ti_x1_x2))
+colnames(sm_interact_AIC_ti_x1_x2)
+```
+
+```{r, eval=TRUE}
+sm_full_AIC_ti <- cbind(sm_marginal_AIC_ti_x1, sm_marginal_AIC_ti_x2, sm_interact_AIC_ti_x1_x2)
+colnames(sm_full_AIC_ti)
+```
+
+```{r,eval=TRUE}
+#marginal terms basis
+sm_full_AIC_ti %>% as.data.frame() %>% tbl_df() %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key,
+                  c("ti_word", "ti_id"),
+                  sep = "\\_",
+                  fill = "right",
+                  remove = FALSE) %>%
+  filter(!grepl('x1:x2', ti_word)) %>%
+  
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(ti_word, ti_id))) +
+  facet_grid(ti_id ~ ti_word, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+  
+```
+
+```{r,eval=TRUE}
+#marginal terms basis
+sm_full_AIC_ti %>% as.data.frame() %>% tbl_df() %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key,
+                  c("ti_word", "ti_id"),
+                  sep = "\\_",
+                  fill = "right",
+                  remove = FALSE) %>%
+  filter(grepl('x1:x2', ti_word)) %>%
+  
+  mutate(id = factor(ti_id, levels = as.vector(unique(ti_id)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap( ~ id, labeller = "label_both")+
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+gam_basis_linear_fit_full_AIC <- lm(y ~ sm_full_AIC_ti, data = train_df)
+gam_basis_linear_fit_full_AIC %>% summary()
+coefplot::coefplot(gam_basis_linear_fit_full_AIC) + theme_bw()
+```
+
+
+
+
+
+
+
+```{r, eval=TRUE}
+df_best_gam_basis_full_BIC <- model_comp_gam_basis_full%>% filter(BIC == min(BIC)) %>% select(df_1, df_2, df_3, df_4, BIC)
+df_best_gam_basis_full_BIC
+```
+
+
+```{r, eval=TRUE}
+sm_marginal_BIC_ti_x1 <- smoothCon(ti(x1, k = df_best_gam_basis_full_BIC$df_1[1]), data = train_df)[[1]]$X
+colnames(sm_marginal_BIC_ti_x1) <- sprintf("x1_s%02d", 1:ncol(sm_marginal_BIC_ti_x1))
+colnames(sm_marginal_BIC_ti_x1)
+```
+
+
+```{r, eval=TRUE}
+sm_marginal_BIC_ti_x2 <- smoothCon(ti(x2, k = df_best_gam_basis_full_BIC$df_2[1]), data = train_df)[[1]]$X
+colnames(sm_marginal_BIC_ti_x2) <- sprintf("x2_s%02d", 1:ncol(sm_marginal_BIC_ti_x2))
+colnames(sm_marginal_BIC_ti_x2)
+```
+
+```{r, eval=TRUE}
+sm_interact_BIC_ti_x1_x2 <- smoothCon(ti(x1, x2, k = c(df_best_gam_basis_full_BIC$df_3[1],df_best_gam_basis_full_BIC$df_4[1])), data = train_df)[[1]]$X
+colnames(sm_interact_BIC_ti_x1_x2) <- sprintf("x1:x2_s%02d", 1:ncol(sm_interact_BIC_ti_x1_x2))
+colnames(sm_interact_BIC_ti_x1_x2)
+```
+
+
+```{r}
+sm_interact_BIC_ti_x1_x2
+```
+
+```{r}
+s <- smoothCon(ti(x1,x2, k = c(9,9)), data = coarse_grid)[[1]]
+s$X
+```
+
+```{r}
+s <- smoothCon(ti(x1,x2, k = c(9,9)), data = coarse_grid)[[1]]
+s %>% as.data.frame() %>% tbl_df() %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  mutate(id = factor(key, levels = as.vector(unique(key)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+
+
+
+```{r, eval=TRUE}
+sm_full_BIC_ti <- cbind(sm_marginal_BIC_ti_x1, sm_marginal_BIC_ti_x2, sm_interact_BIC_ti_x1_x2)
+colnames(sm_full_BIC_ti)
+```
+
+```{r,eval=TRUE}
+#marginal terms basis
+sm_full_BIC_ti %>% as.data.frame() %>% tbl_df() %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key,
+                  c("ti_word", "ti_id"),
+                  sep = "\\_",
+                  fill = "right",
+                  remove = FALSE) %>%
+  filter(!grepl('x1:x2', ti_word)) %>%
+  
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(ti_word, ti_id))) +
+  facet_grid(ti_id ~ ti_word, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+  
+```
+
+```{r,eval=TRUE}
+#marginal terms basis
+sm_full_BIC_ti %>% as.data.frame() %>% tbl_df() %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key,
+                  c("ti_word", "ti_id"),
+                  sep = "\\_",
+                  fill = "right",
+                  remove = FALSE) %>%
+  filter(grepl('x1:x2', ti_word)) %>%
+  
+  mutate(id = factor(ti_id, levels = as.vector(unique(ti_id)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap( ~ id, labeller = "label_both")+
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+gam_basis_linear_fit_full_BIC <- lm(y ~ sm_full_BIC_ti, data = train_df)
+gam_basis_linear_fit_full_BIC %>% summary()
+coefplot::coefplot(gam_basis_linear_fit_full_BIC) + theme_bw()
+```
+
+
+# Using gam function from mgcv package
+
+
+
+```{r}
+gam_fit_func_full <- function(df_1, df_2, df_3, df_4, data){
+  model <- gam(y ~ ti(x1,k = df_1) + ti(x2,k = df_2) + ti(x1, x2,k = c(df_3,df_4)), data = data, method = 'REML')
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2)
+  return(metrics)
+}
+```
+
+```{r}
+gam_model_comp_interact <- pmap_dfr(df_grid_interact$x1, df_grid_interact$x2, gam_fit_func_interact, data = train_df)
+
+df_list <- list(df_grid_full$x1, df_grid_full$x2, df_grid_full$x3, df_grid_full$x4)
+model_comp_df_full <- pmap_dfr(df_list, model_fit_func_full, data = train_df)
+```
+
+```{r}
+gam_model_comp_interact %>% arrange(AIC) %>% mutate(AIC_rank = 1:n()) %>%
+  ggplot(mapping = aes(x = as.factor(df_1), y= as.factor(df_2))) +
+  geom_tile(mapping = aes(fill = AIC)) +
+  geom_text(mapping = aes(label = AIC_rank), color = "white") 
+```
+
+
+
+```{r, eval=TRUE}
+gam_model_fit_full_ti <- gam(y ~ ti(x1,k = 10) + ti(x2,k = 12) + ti(x1, x2,k = c(10,12)), data = train_df, method = 'REML')
+gam_model_full_basis_mat_ti <- predict.gam(gam_model_fit_full_ti, type = "lpmatrix")
+gam_model_full_basis_mat_ti
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

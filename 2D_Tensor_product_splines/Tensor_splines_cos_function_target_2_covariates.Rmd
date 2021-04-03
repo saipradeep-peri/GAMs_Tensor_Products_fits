@@ -1,0 +1,886 @@
+---
+title: "Tensor_splines_cos_function_target_2_covariates"
+author: "Sai Pradeep Peri"
+date: "10/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 100
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+
+
+```{r, eval=TRUE}
+### set the true relationships per factor
+
+### set the functional expressions
+
+true_functions <- list(
+  g1 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)},
+  g2 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)}
+)
+
+### set the parameters of the functions
+true_hypers <- list(
+  g1 = list(a0 = 0, a1 = 1, a2 = 1),
+  g2 = list(a0 = 0, a1 = 1, a2 = 1)
+)
+```
+
+
+```{r, eval=TRUE}
+### define a wrapper function for executing the functions
+run_factors <- function(myfunc, myx, myparams)
+{
+  myfunc(myx, myparams)
+}
+```
+
+
+```{r, eval=TRUE}
+### calculate each of the factors over the fine grid
+fine_true_factors <- purrr::pmap(list(true_functions,
+                                      fine_grid_list,
+                                      true_hypers),
+                                 run_factors)
+
+fine_true_factors
+```
+
+```{r, eval=TRUE}
+fine_true_latent_dfs <- purrr::pmap(list(fine_grid_list,
+                                         fine_true_factors,
+                                         1:2),
+                                    function(x, g, glabel){tibble::tibble(x = x, g = g) %>% 
+                                        purrr::set_names(c(sprintf("x%d", glabel),
+                                                           sprintf("g%d", glabel))) %>% 
+                                        tibble::rowid_to_column(sprintf("x%d_id", glabel))})
+
+fine_true_latent_dfs
+```
+
+
+
+```{r, eval=TRUE}
+### create the tensor product of the two factors
+fine_latent_tensor <- expand.grid(fine_grid_list,
+            KEEP.OUT.ATTRS = FALSE,
+            stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df() %>% 
+  left_join(fine_true_latent_dfs[[1]], by = "x1") %>% 
+  left_join(fine_true_latent_dfs[[2]], by = "x2") %>% 
+  select(ends_with("_id"), x1:x2, g1, g2) %>% 
+  tibble::rowid_to_column("fine_id")
+fine_latent_tensor
+```
+
+```{r, eval=TRUE}
+### visualize the sum of the first two factors
+fine_latent_tensor %>% 
+  count(x1, x2, g1, g2) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = g1 + g2)) +
+  coord_equal() +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+# ```{r, eval=TRUE}
+# fine_latent_tensor %>%
+#   mutate(Additive = g1 + g2, Multiplicative = g1 * g2, Interaction = g1 + g2 + g1 * g2)
+# ```
+
+
+## Additve part only
+
+```{r}
+library(splines)
+Xfine_add <- model.matrix( ~ ns(x1, 4) + ns(x2, 5), data = fine_latent_tensor)
+Xfine_add %>% colnames()
+```
+
+
+
+```{r}
+Xfine_add %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(fine_latent_tensor %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_word", "feature_word"),
+                  sep = ",",
+                  remove = FALSE) %>% 
+  tidyr::separate(feature_word,
+                  c("dof", "s_id"),
+                  sep = "\\)") %>% 
+  mutate(dof = stringr::str_trim(dof, side = "both")) %>% 
+  filter(!is.na(dof)) %>%
+  tidyr::separate(ns_word,
+                  c("ns_ltr", "variable"),
+                  sep = "\\(",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(variable, dof, s_id))) +
+  facet_grid(s_id ~ variable + dof, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+### generate the coefficients to use
+```{r}
+set.seed(34212)
+beta_true <- c(0, rnorm(n = ncol(Xfine_add)-1, mean = 0, sd = 3))
+beta_true
+```
+
+### calculate the true mean trend on the fine grid
+```{r}
+mu_true_fine <- as.vector(Xfine_add %*% matrix(beta_true))
+```
+
+### visualize the true mean trend
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = mu)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = mu)) +
+  geom_contour(mapping = aes(z = mu),
+               color = "white") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+### use a small amount of noise
+```{r}
+set.seed(23785474)
+y_fine <- rnorm(n = length(mu_true_fine), mean = mu_true_fine, sd = 0.25)
+```
+
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+### downsample to a coarse grid
+```{r}
+coarse_grid <- expand.grid(x1 = seq(-2, 2, length.out = 51),
+                           x2 = seq(-2, 2, length.out = 51),
+                           KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+coarse_grid
+```
+
+
+### create the coarse grid training set
+```{r}
+train_df <- fine_latent_tensor %>% 
+  mutate(y = y_fine) %>% 
+  inner_join(coarse_grid, by = c("x1", "x2"))
+train_df
+```
+
+
+### visualize the training set
+```{r}
+train_df %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+### take a look at the marginal features in the coarse grid
+model.matrix( ~ ns(cos(x1), 8) + ns(cos(x2), 7), train_df) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_word", "feature_word"),
+                  sep = ",",
+                  remove = FALSE) %>% 
+  tidyr::separate(feature_word,
+                  c("dof", "s_id"),
+                  sep = "\\)") %>% 
+  mutate(dof = stringr::str_trim(dof, side = "both")) %>% 
+  filter(!is.na(dof)) %>%
+  tidyr::separate(ns_word,
+                  c("ns_ltr", "variable"),
+                  sep = "\\(",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(variable, dof, s_id))) +
+  facet_grid(s_id ~ variable + dof, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+```{r}
+library(broom)
+```
+
+
+#Function for fitting the model
+```{r}
+model_fit_func <- function(df_1, df_2,df_3, df_4, data){
+  model <- lm(y ~ ns(x1, df = df_1)+ns(x2, df=df_2)+ns(x1, df = df_3):ns(x2, df=df_4), data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2, df_3 = df_3, df_4 = df_4)
+  return(metrics)
+}
+```
+
+
+```{r}
+degree_of_freedom_grid <- expand.grid(x1 = 4:8, x2 = 4:8, x3 = 0:4, x4 = 0:4, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+degree_of_freedom_grid
+```
+
+```{r}
+library(purrr)
+```
+
+```{r}
+df_list <- list(degree_of_freedom_grid$x1,degree_of_freedom_grid$x2,degree_of_freedom_grid$x3,degree_of_freedom_grid$x4)
+model_comp_df <- pmap_dfr(df_list, model_fit_func, data = train_df)
+```
+
+
+```{r}
+model_comp_df[order(model_comp_df$AIC),] %>% select(df_1, df_2, df_3, df_4, AIC)
+```
+
+
+
+```{r, eval=TRUE}
+df_best_AIC_model <- model_comp_df %>% filter(AIC == min(AIC)) %>% select(df_1, df_2, df_3, df_4)
+df_best_AIC_model$df_1[1]
+```
+
+
+```{r, eval=TRUE}
+best_AIC_fit <- lm(y ~ ns(x1, df = df_best_AIC_model$df_1[1]) + ns(x2, df=df_best_AIC_model$df_2[1]) + ns(x1, df = df_best_AIC_model$df_3[1]):ns(x2, df=df_best_AIC_model$df_4[1]), data = train_df)
+best_AIC_fit %>% summary()
+coefplot::coefplot(best_AIC_fit) + theme_bw()
+```
+
+```{r}
+pred_model_fine_grid_ci <- predict(best_AIC_fit, fine_latent_tensor, interval = "confidence")
+pred_model_fine_grid_pi <- predict(best_AIC_fit, fine_latent_tensor, interval = "prediction")
+```
+
+```{r}
+pred_model_fine_grid_df <- pred_model_fine_grid_ci %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  purrr::set_names(c("fit", "ci_lwr", "ci_upr")) %>% 
+  bind_cols(pred_model_fine_grid_pi %>% 
+              as.data.frame() %>% tibble::as_tibble() %>% 
+              purrr::set_names(c("fit", "pred_lwr", "pred_upr")) %>% 
+              select(pred_lwr, pred_upr))
+
+pred_model_fine_grid_df %>% summary()
+```
+
+
+### visualize the prediction on the grid
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = fit)) +
+  coord_equal() +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+### confidence interval difference
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = ci_upr - ci_lwr)) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "inferno") +
+  theme_bw()
+```
+
+### prediction interval difference
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = pred_upr - pred_lwr)) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "plasma") +
+  theme_bw()
+```
+
+
+### look at the error relative to the NOISY fine grid
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(y_fine - fit))) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+
+### show the coarse grid points for refernece
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(y_fine - fit))) +
+  geom_point(data = coarse_grid,
+             mapping = aes(x = x1, y = x2),
+             color = "grey", shape = 0, size = 1) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+
+### look at the error relative to the TRUTH
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(mu - fit))) +
+  geom_point(data = coarse_grid,
+             mapping = aes(x = x1, y = x2),
+             color = "grey", shape = 0, size = 1) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+### look at the error realtive to the TRUTH vs x1
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = abs(mu - fit))) +
+  geom_line(mapping = aes(group = x2)) +
+  facet_wrap(~x2, labeller = "label_both", nrow = 11) +
+  theme_bw()
+```
+
+### compare the error relative to the TRUE range
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = abs(mu - fit) / (diff(range(mu_true_fine))))) +
+  geom_line(mapping = aes(group = x2)) +
+  facet_wrap(~x2, labeller = "label_both", nrow = 11) +
+  theme_bw()
+```
+
+
+
+
+
+## Interaction with marginal effects included
+
+```{r, eval=TRUE}
+### visualize the sum of the first two factors
+fine_latent_tensor %>% 
+  count(x1, x2, g1, g2) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = g1 + g2 + g1*g2)) +
+  coord_equal() +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+library(splines)
+Xfine_interact <- model.matrix( ~ ns(g1, 4) + ns(g2, 5) + ns(g1,3):ns(g2,2), data = fine_latent_tensor)
+Xfine_interact %>% colnames()
+```
+
+### visualize the marginal (main effects) over the grid
+```{r}
+Xfine_interact %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(fine_latent_tensor %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_word", "feature_word"),
+                  sep = ",",
+                  remove = FALSE) %>% 
+  tidyr::separate(feature_word,
+                  c("dof", "s_id"),
+                  sep = "\\)") %>% 
+  mutate(dof = stringr::str_trim(dof, side = "both")) %>% 
+  filter(!is.na(dof)) %>%
+  tidyr::separate(ns_word,
+                  c("ns_ltr", "variable"),
+                  sep = "\\(",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(variable, dof, s_id))) +
+  facet_grid(s_id ~ variable + dof, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+### look at the interaction effects
+```{r}
+Xfine_interact %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(fine_latent_tensor %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(!is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_x1_word", "x1_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  tidyr::separate(right_word,
+                  c("ns_x2_word", "x2_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_grid(x2_s_id ~ x1_s_id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r}
+set.seed(898123)
+beta_true_interact <- c(0, rnorm(n = ncol(Xfine_interact)-1, mean = 0, sd = 3))
+
+beta_true_interact
+```
+
+
+### calculate the true mean trend 
+
+```{r}
+mu_true_fine_interact <- as.vector(Xfine_interact %*% matrix(beta_true_interact))
+```
+
+### visualize the true mean trend
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine_interact) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = mu)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine_interact) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = mu)) +
+  geom_contour(mapping = aes(z = mu),
+               color = "white") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+### use a small amount of noise
+```{r}
+set.seed(65656)
+y_fine_interact <- rnorm(n = length(mu_true_fine_interact), mean = mu_true_fine_interact, sd = 0.3)
+```
+
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine_interact) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+### downsample to a coarse grid
+```{r}
+coarse_grid_interact <- expand.grid(x1 = seq(-2, 2, length.out = 51),
+                           x2 = seq(-2, 2, length.out = 51),
+                           KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+coarse_grid_interact
+```
+
+
+### create the training set
+```{r}
+train_df_interact <- fine_latent_tensor %>% 
+  mutate(y = y_fine_interact) %>% 
+  inner_join(coarse_grid_interact, by = c("x1", "x2"))
+train_df_interact
+```
+
+### visualize the training set
+```{r}
+train_df_interact %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+### take a look at the marginal features in the coarse grid
+model.matrix( ~ ns(g1, 4) + ns(g2, 5) + ns(g1,3):ns(g2,2), train_df_interact) %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_word", "feature_word"),
+                  sep = ",",
+                  remove = FALSE) %>% 
+  tidyr::separate(feature_word,
+                  c("dof", "s_id"),
+                  sep = "\\)") %>% 
+  mutate(dof = stringr::str_trim(dof, side = "both")) %>% 
+  filter(!is.na(dof)) %>%
+  tidyr::separate(ns_word,
+                  c("ns_ltr", "variable"),
+                  sep = "\\(",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value,
+                            group = interaction(variable, dof, s_id))) +
+  facet_grid(s_id ~ variable + dof, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+
+```{r}
+### interaction effects on the coarse grid
+model.matrix( ~ ns(g1, 4) + ns(g2, 5) + ns(g1,3):ns(g2,2), train_df_interact)  %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  select(-`(Intercept)`) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>% 
+  tidyr::separate(key,
+                  c("left_word", "right_word"),
+                  sep = ":",
+                  fill = "right",
+                  remove = FALSE) %>% 
+  filter(!is.na(right_word)) %>% 
+  tidyr::separate(left_word,
+                  c("ns_x1_word", "x1_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  tidyr::separate(right_word,
+                  c("ns_x2_word", "x2_s_id"),
+                  sep = "\\)",
+                  remove = FALSE) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_grid(x2_s_id ~ x1_s_id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+#Function for fitting the model
+```{r}
+model_fit_func_interact <- function(df_1, df_2,df_3, df_4, data){
+  model <- lm(y ~ ns(x1, df = df_1)+ns(x2, df=df_2)+ns(x1, df = df_3):ns(x2, df=df_4), data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_1, df_2 = df_2, df_3 = df_3, df_4 = df_4)
+  return(metrics)
+}
+```
+
+
+```{r}
+df_grid_interact <- expand.grid(x1 = 8:12, x2 = 8:12, x3 = 8:12, x4 = 8:12, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+df_grid_interact
+```
+
+```{r}
+df_list_interact <- list(df_grid_interact$x1, df_grid_interact$x2, df_grid_interact$x3, df_grid_interact$x4)
+model_comp_df_interact <- pmap_dfr(df_list_interact, model_fit_func_interact, data = train_df_interact)
+```
+
+```{r}
+model_comp_df_interact[order(model_comp_df_interact$AIC),] %>% select(df_1, df_2, df_3, df_4, AIC)
+```
+
+```{r, eval=TRUE}
+df_best_AIC_model_interact <- model_comp_df_interact %>% filter(AIC == min(AIC)) %>% select(df_1, df_2, df_3, df_4)
+df_best_AIC_model_interact$df_1[1]
+```
+
+```{r, eval=TRUE}
+best_AIC_fit_interact <- lm(y ~ ns(x1, df = df_best_AIC_model_interact$df_1[1]) + ns(x2, df=df_best_AIC_model_interact$df_2[1]) + ns(x1, df = df_best_AIC_model_interact$df_3[1]):ns(x2, df=df_best_AIC_model_interact$df_4[1]), data = train_df_interact)
+best_AIC_fit_interact %>% summary()
+coefplot::coefplot(best_AIC_fit_interact) + theme_bw()
+```
+
+
+```{r}
+pred_model_interact_fine_grid_ci <- predict(best_AIC_fit_interact, fine_latent_tensor, interval = "confidence")
+pred_model_interact_fine_grid_pi <- predict(best_AIC_fit_interact, fine_latent_tensor, interval = "prediction")
+```
+
+```{r}
+pred_model_interact_fine_grid_df <- pred_model_interact_fine_grid_ci %>% 
+  as.data.frame() %>% tibble::as_tibble() %>% 
+  purrr::set_names(c("fit", "ci_lwr", "ci_upr")) %>% 
+  bind_cols(pred_model_interact_fine_grid_pi %>% 
+              as.data.frame() %>% tibble::as_tibble() %>% 
+              purrr::set_names(c("fit", "pred_lwr", "pred_upr")) %>% 
+              select(pred_lwr, pred_upr))
+
+pred_model_interact_fine_grid_df %>% summary()
+```
+
+
+### visualize the prediction on the grid
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = fit)) +
+  coord_equal() +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+### confidence interval difference
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = ci_upr - ci_lwr)) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "inferno") +
+  theme_bw()
+```
+
+### prediction interval difference
+```{r}
+fine_latent_tensor %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = pred_upr - pred_lwr)) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "plasma") +
+  theme_bw()
+```
+
+### look at the error relative to the NOISY fine grid
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine_interact) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(y - fit))) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+
+### show the coarse grid points for refernece
+```{r}
+fine_latent_tensor %>% 
+  mutate(y = y_fine_interact) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(y - fit))) +
+  geom_point(data = coarse_grid,
+             mapping = aes(x = x1, y = x2),
+             color = "grey", shape = 0, size = 1) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+### look at the error relative to the TRUTH
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine_interact) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = abs(mu - fit))) +
+  geom_point(data = coarse_grid,
+             mapping = aes(x = x1, y = x2),
+             color = "grey", shape = 0, size = 1) +
+  coord_equal() +
+  scale_fill_viridis_b(option = "magma") +
+  theme_bw()
+```
+
+
+### look at the error realtive to the TRUTH vs x1
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine_interact) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = abs(mu - fit))) +
+  geom_line(mapping = aes(group = x2)) +
+  facet_wrap(~x2, labeller = "label_both", nrow = 11) +
+  theme_bw()
+```
+
+### compare the error relative to the TRUE range
+```{r}
+fine_latent_tensor %>% 
+  mutate(mu = mu_true_fine_interact) %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(pred_model_interact_fine_grid_df %>% 
+              tibble::rowid_to_column(),
+            by = "rowid") %>% 
+  ggplot(mapping = aes(x = x1, y = abs(mu - fit) / (diff(range(mu))))) +
+  geom_line(mapping = aes(group = x2)) +
+  facet_wrap(~x2, labeller = "label_both", nrow = 11) +
+  theme_bw()
+```
+
+
+```{r}
+```
+
+```{r}
+```
+
+
+
+
+
+
+

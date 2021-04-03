@@ -1,0 +1,500 @@
+---
+title: "Tensor_splines_penalty_included"
+author: "Sai Pradeep Peri"
+date: "11/3/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, eval=TRUE}
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(broom)
+library(splines)
+library(purrr)
+```
+
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 40
+
+fine_grid_list <- list(
+  x1 = seq(0, 4, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+```{r, eval=TRUE}
+### set the true relationships per factor
+
+### set the functional expressions
+
+true_functions <- list(
+  g1 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)},
+  g2 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)}
+)
+
+### set the parameters of the functions
+true_hypers <- list(
+  g1 = list(a0 = 0, a1 = 1, a2 = 1),
+  g2 = list(a0 = 0, a1 = 1, a2 = 1)
+)
+```
+
+```{r, eval=TRUE}
+### define a wrapper function for executing the functions
+run_factors <- function(myfunc, myx, myparams)
+{
+  myfunc(myx, myparams)
+}
+```
+
+```{r, eval=TRUE}
+### calculate each of the factors over the fine grid
+fine_true_factors <- purrr::pmap(list(true_functions,
+                                      fine_grid_list,
+                                      true_hypers),
+                                 run_factors)
+
+fine_true_factors
+```
+
+```{r, eval=TRUE}
+fine_true_latent_dfs <- purrr::pmap(list(fine_grid_list,
+                                         fine_true_factors,
+                                         1:2),
+                                    function(x, g, glabel){tibble::tibble(x = x, g = g) %>% 
+                                        purrr::set_names(c(sprintf("x%d", glabel),
+                                                           sprintf("g%d", glabel))) %>% 
+                                        tibble::rowid_to_column(sprintf("x%d_id", glabel))})
+
+fine_true_latent_dfs
+```
+
+## Lets first experiment with single dimension x1 and g1. (1D case)
+
+```{r, eval = TRUE}
+fine_latent_df_1d <- fine_true_latent_dfs$x1
+fine_latent_df_1d
+```
+
+```{r, eval=TRUE}
+fine_latent_df_1d %>%
+  ggplot(mapping = aes(x = x1, y = g1)) +
+  geom_line(size = 1.15) +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+### generate the noisy observations
+sd_noise_1d <- 0.1 # noise
+
+set.seed(783473)
+fine_df_1d <- fine_latent_df_1d %>% 
+  mutate(y = rnorm(n = n(), mean = g1, sd = sd_noise_1d))
+fine_df_1d
+```
+
+
+```{r, eval=TRUE}
+fine_df_1d %>%
+  ggplot(mapping = aes(x = x1, y = g1)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 20
+
+coarse_grid_list <- list(
+  x1 = seq(0, 4, length.out = num_coarse_int+1),
+  x2 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid_list
+```
+
+```{r,eval=TRUE}
+train_df_1d <- fine_df_1d %>% 
+  right_join(coarse_grid_list %>% as.data.frame() %>% tbl_df(), by = c("x1"))
+
+train_df_1d
+```
+
+```{r, eval=TRUE}
+train_df_1d %>%
+  ggplot(mapping = aes(x = x1, y = g1)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+# The original fit stats
+
+````{r}
+marginal_cosine_model_1d <- lm(y ~ g1, data = train_df_1d)
+marginal_cosine_model_1d %>% glance()
+````
+
+# Build 1D basis using smoothcon
+
+```{r, eval = TRUE}
+smooth_1d <-smoothCon(s(x1, k=20), data = train_df_1d)[[1]] # diagonal.penalty = TRUE
+sm_1d_basis_mat <- smooth_1d$X
+sm_1d_penalty_mat <- smooth_1d$S
+sm_1d_basis_mat %>% as.data.frame() %>% tbl_df()
+```
+
+
+```{r}
+class(smooth_1d)
+```
+
+```{r, eval=TRUE}
+sm_1d_basis_mat %>% as.data.frame() %>% tbl_df() %>%
+  mutate(x1 = train_df_1d$x1) %>% 
+  tibble::rowid_to_column() %>% 
+  tidyr::gather(key = "key", value = "value", -rowid, -x1) %>%
+  ggplot(mapping = aes(x = x1, y = value)) +
+  geom_line(mapping = aes(color = key),
+            size = 1.15) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+```{r}
+
+```
+
+
+```{r}
+as.matrix(sm_1d_basis_mat %>% as.data.frame() %>% tbl_df())
+```
+
+```{r}
+train_df <- sm_1d_basis_mat %>% as.data.frame() %>% tbl_df() %>% mutate(y = train_df_1d$y)
+train_df
+```
+
+
+```{r, eval=TRUE}
+sm_1d_basis_fit <- lm(y ~ ., data = train_df)
+sm_1d_basis_fit %>% summary()
+coefplot::coefplot(sm_1d_basis_fit) + theme_bw()
+sm_1d_basis_fit %>% glance()
+```
+
+```{r, eval=TRUE}
+test_basis_mat <- PredictMat(smooth_1d, fine_df_1d) %>% as.data.frame() %>% tbl_df()
+test_pred <- predict(sm_1d_basis_fit, newdata = test_basis_mat)
+test_pred
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_point(mapping = aes(y = y), color = "red") +
+  theme_bw()
+```
+
+
+
+
+
+# ```{r, eval=TRUE}
+# ### make the predictions of the fine grid
+# sm_1d_basis_pred_test_confint <- predict(sm_1d_basis_fit, fine_grid_list$x1 %>% as.data.frame() %>% tbl_df()) %>% 
+#   as.data.frame() %>% tbl_df()
+# 
+# sm_1d_basis_pred_test_confint
+# ```
+# 
+# ```{r, eval=TRUE}
+# ### focus on the x2-trend first by looking at the x1 training location
+# fine_df_1d %>% 
+#   bind_cols(sm_1d_basis_pred_test_confint) %>% 
+#   ggplot(mapping = aes(x = x1)) +
+#   geom_ribbon(mapping = aes(ymin = lwr, ymax = upr, group = x2),
+#               fill = "blue", alpha = 0.25) +
+#   geom_line(mapping = aes(y = fit, group = x2),
+#             color = "black") +
+#   geom_point(mapping = aes(y = y),
+#              color = "red", size = 0.85) +
+#   theme_bw() 
+# ```
+
+```{r}
+minimize_error_func <- function(beta, my_info){
+  basis_mat = my_info$basis_mat
+  
+  response_vec = my_info$yobs
+  
+  lambda = my_info$lambda
+  
+  penalty_mat = my_info$penalty_mat
+  
+  linear_pred = as.vector(basis_mat %*% as.matrix(beta))
+  
+  sum_of_squares = sum((response_vec - linear_pred) ^ 2)
+  
+  penalty = t(as.matrix(beta)) %*% (penalty_mat %*% as.matrix(beta))
+  
+  objective = sum_of_squares + lambda * penalty
+
+  objective  
+}
+```
+
+
+```{r, eval=TRUE}
+info <- list(
+yobs = train_df_1d$y, 
+basis_mat = as.matrix(sm_1d_basis_mat %>% as.data.frame() %>% tbl_df()),
+penalty_mat = as.matrix(sm_1d_penalty_mat %>% as.data.frame() %>% tbl_df()),
+lambda = 0.1
+)
+```
+
+```{r}
+start_guess = rnorm(n = ncol(info$basis_mat), mean = 0, sd = 2)
+fit <- optim(start_guess,
+               minimize_error_func,
+               gr = NULL,
+               info,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = 1, maxit = 1001))
+```
+
+```{r}
+fit
+```
+
+```{r}
+prediction <- as.matrix(test_basis_mat)  %*% as.matrix(fit$par)
+prediction
+```
+
+```{r}
+fine_df_1d %>%
+  mutate(y_pred = prediction) %>%
+  mutate(y_pred_unreg = test_pred) %>%
+  ggplot(mapping = aes(x = x1, y = y_pred)) +
+  geom_line(size = 1.15) +
+  geom_line(mapping = aes(y = y_pred_unreg), color = 'blue') +
+  
+  geom_point(mapping = aes(y = y), color = "red") +
+  
+  theme_bw()
+```
+
+'ns(x1):ns(x2)
+
+ts(x1, x2) -> ts(x1):ts(x2)
+
+
+```{r, eval=TRUE}
+info_int <- list(
+yobs = train_df_1d$y, 
+design_matrix = as.matrix(sm_1d_basis_mat %>% as.data.frame() %>% tbl_df()),
+penalty_matrix = as.matrix(sm_1d_penalty_mat %>% as.data.frame() %>% tbl_df()),
+length_beta = ncol(as.matrix(sm_1d_basis_mat %>% as.data.frame() %>% tbl_df())),
+mu_beta = 0,
+tau_beta = 5,
+sigma_rate = 1
+)
+```
+
+
+```{r, eval=TRUE}
+lm_logpost <- function(unknown_param, my_info){
+  beta_v <- unknown_param[1:my_info$length_beta]
+  # back-transform from phi to sigma
+  lik_phi <- unknown_param[my_info$length_beta + 1]
+  lik_sigma <- exp(lik_phi)
+  # extract design matrix
+  X <- my_info$design_matrix
+  # calculate the linear predictor
+  mu <- as.vector(X %*% as.matrix(beta_v)) 
+  # evaluate the log-likelihood
+  log_lik <- sum(dnorm(x = my_info$yobs, mean = mu, sd = lik_sigma, log = TRUE))
+  # evaluate the log-prior
+  #mu_prior <- t(as.matrix(beta_v)) %*% (my_info$penalty_matrix %*% as.matrix(beta_v))
+  
+  #log_prior_beta <- sum(dnorm(x = beta_v, mean = my_info$mu_beta, sd = my_info$tau_beta, log = TRUE)) 
+                              
+  #log_prior_sigma <- dexp(lik_sigma, my_info$sigma_rate, log = TRUE)
+  #log_prior <- log_prior_beta + log_prior_sigma
+# account for the transformation
+  log_derive_adjust <- lik_phi
+  # sum together
+  #log_lik + log_prior + log_derive_adjust 
+  log_lik + log_derive_adjust 
+}
+```
+
+
+```{r}
+beta_init <- rnorm(n = info_int$length_beta + 1, mean = 0, sd = 3)
+#beta_init
+```
+
+
+```{r}
+lm_logpost(beta_init, info_int)
+```
+
+```{r}
+start_guess = beta_init
+fit <- optim(beta_init,
+               lm_logpost,
+               gr = NULL,
+               info_int,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = -1, maxit = 1001))
+```
+
+
+```{r}
+fit
+```
+
+
+```{r, eval=TRUE}
+my_laplace <- function(start_guess, logpost_func, ...)
+{
+  # code adapted from the `LearnBayes`` function `laplace()`
+  fit <- optim(start_guess,
+               logpost_func,
+               gr = NULL,
+               ...,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = -1, maxit = 1001))
+  
+  mode <- fit$par
+  h <- -solve(fit$hessian)
+  p <- length(mode)
+  int <- p/2 * log(2 * pi) + 0.5 * log(det(h)) + logpost_func(mode, ...)
+  list(mode = mode,
+       var_matrix = h,
+       log_evidence = int,
+       converge = ifelse(fit$convergence == 0,
+                         "YES", 
+                         "NO"),
+       iter_counts = fit$counts[1])
+}
+```
+
+
+```{r}
+laplace_result_1d_1 <- my_laplace(beta_init, lm_logpost, info_int)
+laplace_result_1d_2 <- my_laplace(rep(0, info_int$length_beta + 1), lm_logpost, info_int)
+```
+
+
+
+```{r}
+#as.vector(X %*% as.matrix(beta_v)) 
+test_mat %*% as.vector(fit$par)[1:ncol(test_mat)]
+```
+
+
+
+```{r}
+sm_1d_penalty_mat %>% as.data.frame() %>% tbl_df()
+```
+
+
+
+
+
+
+
+
+```{r}
+manage_lm_fit <- function(design_matrix, logpost_func, response_vector, add_info)
+{
+  # include the design matrix with the settings
+  add_info$design_matrix <- design_matrix
+  
+  # assign the responses correctly
+  add_info$yobs <- response_vector
+  
+  # specify the number of linear predictor parameters
+  add_info$length_beta <- ncol(design_matrix)
+  
+  # generate random initial guess
+  init_beta <- rnorm(add_info$length_beta , 0, 1)
+  
+  init_phi <- log(rexp(n = 1, rate = add_info$sigma_rate))
+  
+  fit <- optim(c(init_beta, init_phi),
+               logpost_func,
+               gr = NULL,
+               add_info,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = -1, maxit = 1001))
+  fit
+}
+```
+
+
+```{r}
+hyper_list <- list(
+  mu_beta = 0,
+  tau_beta = 5,
+  sigma_rate = 1,
+  penalty_matrix = as.matrix(sm_1d_penalty_mat %>% as.data.frame() %>% tbl_df())
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

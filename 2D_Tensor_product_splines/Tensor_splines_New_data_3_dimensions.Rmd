@@ -1,0 +1,233 @@
+---
+title: "Tensro_splines_New_data_3_dimension"
+author: "Sai Pradeep Peri"
+date: "9/29/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 40
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1),
+  x3 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+```{r}
+fine_grid <- expand.grid(fine_grid_list, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+fine_grid
+```
+
+
+```{r}
+library(splines)
+fine_basis_mat <- model.matrix(~ ns(x1, df = 8):ns(x2, df=6):ns(x3, df=4), data = fine_grid)
+colnames(fine_basis_mat)
+```
+
+
+```{r}
+set.seed(875421)
+beta_true <- rnorm(n = ncol(fine_basis_mat), mean = 0, sd = 3)
+beta_true
+```
+
+
+```{r, eval=TRUE}
+fine_basis_mat %>% as.data.frame() %>% bind_cols(fine_grid) %>%
+  select(x1, x2, x3, `ns(x1, df = 8)2:ns(x2, df = 6)6:ns(x3, df = 4)2`) %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = `ns(x1, df = 8)2:ns(x2, df = 6)6:ns(x3, df = 4)2`)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r}
+mean_trend_true <- as.numeric(fine_basis_mat %*% as.matrix(beta_true))
+```
+
+
+```{r}
+fine_grid %>% mutate(mu = mean_trend_true) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = mu)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c()
+```
+
+```{r}
+set.seed(5467546)
+noisy_mean_trend <- rnorm(n = length(mean_trend_true), mean = mean_trend_true, sd = 0.2)
+```
+
+
+```{r}
+fine_grid %>% mutate(mu = noisy_mean_trend) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = mu)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c()
+```
+
+```{r}
+noisy_df <- fine_grid %>% mutate(y = noisy_mean_trend)
+noisy_df
+```
+
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 20
+
+coarse_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_coarse_int+1),
+  x2 = seq(-2, 2, length.out = num_coarse_int+1),
+  x3 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid_list
+```
+
+```{r, eval=TRUE}
+coarse_grid <- expand.grid(coarse_grid_list,
+                           KEEP.OUT.ATTRS = FALSE,
+                           stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df()
+coarse_grid
+```
+
+```{r,eval=TRUE}
+train_df <- noisy_df %>% 
+  right_join(coarse_grid, by = c("x1", "x2", "x3"))
+
+train_df %>% count(x1)
+
+train_df %>% count(x2)
+
+train_df %>% count(x3)
+
+train_df
+```
+
+```{r}
+train_df %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = y)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c()
+```
+
+```{r}
+tensor_spline_mod <- lm(y ~ ns(x1, df = 2):ns(x2, df =5):ns(x3, df = 4), data = train_df)
+tensor_spline_mod %>% summary()
+coefplot::coefplot(tensor_spline_mod) + theme_bw()
+```
+```{r}
+library(broom)
+```
+
+```{r}
+model_fit_func <- function(df_x1, df_x2, df_x3, data){
+  model <- lm(y ~ ns(x1, df = df_x1):ns(x2, df=df_x2):ns(x3, df=df_x3), data = data)
+  metrics <- glance(model) %>% mutate(df_1 = df_x1, df_2 = df_x2, df_3 = df_x3)
+  return(metrics)
+}
+```
+
+
+```{r}
+degree_of_freedom_grid <- expand.grid(x1 = 7:10, x2 = 5:7, x3 = 4:7, KEEP.OUT.ATTRS = FALSE) %>% as.data.frame() %>% tbl_df()
+degree_of_freedom_grid
+```
+
+```{r}
+library(purrr)
+```
+
+
+```{r}
+model_comp_df <- pmap_dfr(list(degree_of_freedom_grid$x1,degree_of_freedom_grid$x2,degree_of_freedom_grid$x3), model_fit_func, data = noisy_df)
+```
+
+```{r, eval=TRUE}
+model_comp_df[order(model_comp_df$AIC),] %>% select(df_1, df_2, df_3, AIC)
+```
+
+
+```{r, eval=TRUE}
+df_best_AIC_model <- model_comp_df %>% filter(AIC == min(AIC)) %>% select(df_1, df_2, df_3)
+```
+
+```{r, eval=TRUE}
+best_AIC_fit <- lm(y ~ ns(x1, df = df_best_AIC_model$df_1):ns(x2, df=df_best_AIC_model$df_2):ns(x3, df=df_best_AIC_model$df_3), data = train_df)
+best_AIC_fit %>% summary()
+coefplot::coefplot(best_AIC_fit) + theme_bw()
+```
+
+```{r, eval=TRUE}
+pred_df <- noisy_df %>% 
+  anti_join(coarse_grid, by = c("x1", "x2", "x3"))
+```
+
+```{r, eval=TRUE}
+prediction <- predict(best_AIC_fit, pred_df, se.fit = TRUE) %>%  as.data.frame() %>% tbl_df()
+```
+
+```{r, eval=TRUE}
+pred_df %>% mutate(pred_fit = prediction$fit) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = pred_fit)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c()
+```
+
+```{r, eval=TRUE}
+noisy_df_prediction <- predict(best_AIC_fit, noisy_df, se.fit = TRUE) %>%  as.data.frame() %>% tbl_df()
+```
+
+
+```{r}
+noisy_df %>% mutate(pred_fit = noisy_df_prediction$fit) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = pred_fit)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_viridis_c()
+```
+
+```{r}
+fine_grid %>% mutate(mse = (mean_trend_true - noisy_df_prediction$fit)^2) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = mse)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  #scale_fill_viridis_c()
+  scale_fill_gradient(low = 'white', high = 'blue') +
+  theme_bw()
+```
+
+```{r}
+fine_grid %>% mutate(se = (mean_trend_true - noisy_df_prediction$fit)) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = se)) +
+  facet_wrap(~ x3, labeller = "label_both") +
+  scale_fill_gradient2(low = 'red', mid = 'white', high = 'blue') +
+  theme_bw()
+```
+
+
