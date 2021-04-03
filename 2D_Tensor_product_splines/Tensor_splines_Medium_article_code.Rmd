@@ -1,0 +1,392 @@
+---
+title: "Tensor_Splines_Medium_article_code"
+author: "Sai Pradeep Peri"
+date: "4/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+## Tensor splines with using only 2 covariates.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(purrr)
+```
+
+
+```{r, eval=TRUE}
+### define the fine spatial grids for each GP, the spatial resolution
+### will be between -2 and 2 for all dimensions for simplicity
+num_fine_int <- 40
+
+fine_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_fine_int+1),
+  x2 = seq(-2, 2, length.out = num_fine_int+1)
+)
+fine_grid_list
+```
+
+
+```{r, eval=TRUE}
+### set the true relationships per factor
+
+### set the functional expressions
+
+true_functions <- list(
+  g1 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)},
+  g2 = function(x, av){av$a0 + av$a1 * cos(av$a2 * pi * x)}
+)
+
+### set the parameters of the functions
+true_hypers <- list(
+  g1 = list(a0 = 0, a1 = 1, a2 = 1),
+  g2 = list(a0 = 0, a1 = 1, a2 = 1)
+)
+```
+
+```{r, eval=TRUE}
+### define a wrapper function for executing the functions
+run_factors <- function(myfunc, myx, myparams)
+{
+  myfunc(myx, myparams)
+}
+```
+
+```{r, eval=TRUE}
+### calculate each of the factors over the fine grid
+fine_true_factors <-pmap(list(true_functions,
+                              fine_grid_list,
+                              true_hypers),
+                         run_factors)
+
+fine_true_factors
+```
+
+```{r, eval=TRUE}
+pmap_dfr(list(fine_grid_list,
+              fine_true_factors,
+              1:2),
+         function(x, g, glabel){tibble::tibble(x = x, g = g) %>% 
+             mutate(factor_name = glabel)}) %>% 
+  ggplot(mapping = aes(x = x, y = g)) +
+  geom_line(mapping = aes(group = factor_name), size = 1.15) +
+  facet_wrap(~factor_name) +
+  theme_bw()
+```
+
+Above we have defined 2 univariate smooth functions
+$$
+g1(x) = a_0+a_1cos(a_2\pi x) \\
+g2(x) = a_0+a_1cos(a_2\pi x) \\
+$$
+
+$$
+f(x) = g1(x) * g2(x) 
+$$
+
+
+```{r, eval=TRUE}
+fine_true_latent_dfs <- 
+  pmap(list(fine_grid_list,
+            fine_true_factors,
+            1:2),
+       function(x, g, glabel){tibble::tibble(x = x, g = g) %>% 
+           set_names(c(sprintf("x%d", glabel),
+                       sprintf("g%d", glabel))) %>% 
+           tibble::rowid_to_column(sprintf("x%d_id", glabel))})
+
+fine_true_latent_dfs
+```
+
+
+```{r, eval=TRUE}
+### create the tensor product of the three factors
+fine_latent_tensor <- expand.grid(fine_grid_list,
+            KEEP.OUT.ATTRS = FALSE,
+            stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df() %>% 
+  left_join(fine_true_latent_dfs[[1]], by = "x1") %>% 
+  left_join(fine_true_latent_dfs[[2]], by = "x2") %>% 
+  select(ends_with("_id"), x1:x2, g1, g2) %>% 
+  tibble::rowid_to_column("fine_id")
+fine_latent_tensor
+```
+
+```{r, eval=TRUE}
+### visualize the sum of the first two factors
+fine_latent_tensor %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = g1 * g2)) +
+  coord_equal() +
+  scale_fill_viridis_c() +
+  theme_bw()
+```
+
+```{r, eval = TRUE}
+### visualize the sum of the all 2 factors
+fine_latent_tensor %>% 
+  mutate(go = g1 * g2) %>% 
+  ggplot(mapping = aes(x = x1, y = go)) +
+  geom_line() +
+  facet_wrap(~x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+```{r, eval=TRUE}
+### generate the noisy observations
+set.seed(434343)
+sd_noise <- 0.2 # noise
+
+set.seed(813123)
+fine_df <- fine_latent_tensor %>% 
+  mutate(go = g1 * g2,
+         y = rnorm(n = n(), mean = go, sd = sd_noise))
+
+fine_df
+```
+
+```{r, eval=TRUE}
+### look at the fine grid noisy data in log space
+fine_df %>% 
+  ggplot(mapping = aes(x = x1, y = y)) +
+  geom_point() +
+  facet_wrap(~x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+look at the `y` response.  
+
+```{r}
+fine_df %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = y)) +
+  scale_fill_viridis_c() +
+  coord_equal() +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+### work with a coarse grid instead of all of the points in the fine grid
+num_coarse_int <- 20
+
+coarse_grid_list <- list(
+  x1 = seq(-2, 2, length.out = num_coarse_int+1),
+  x2 = seq(-2, 2, length.out = num_coarse_int+1)
+)
+coarse_grid_list
+```
+
+```{r, eval=TRUE}
+coarse_grid <- expand.grid(coarse_grid_list,
+                           KEEP.OUT.ATTRS = FALSE,
+                           stringsAsFactors = FALSE) %>% 
+  as.data.frame() %>% tbl_df()
+coarse_grid
+```
+
+
+```{r,eval=TRUE}
+train_df <- fine_df %>% 
+  right_join(coarse_grid, by = c("x1", "x2"))
+
+train_df %>% count(x1)
+
+train_df %>% count(x2)
+```
+
+
+```{r, eval=TRUE}
+### look at the true latent function in the log-space with respect to x2
+train_df %>% 
+  ggplot(mapping = aes(x = x1, y = go)) +
+  geom_line() +
+  geom_point(mapping = aes(y = y), color = "red") +
+  facet_wrap(~ x2, labeller = "label_both") +
+  theme_bw() +
+  theme(axis.text = element_blank())
+```
+
+ti() vs te()
+
+te() -> this performs a full tensor product with taking in to consideration of marginal terms.
+ti() -> this considers only pure interaction with no marginal effects.
+
+Lets start with ti() fit
+
+Fit two models 
+
+model_1 = ti(x1, x2)
+
+model_2 = ti(x1) + ti(x2) + ti(x1,x2)
+
+```{r}
+ti_model_marginal_interaction <- gam(y ~ ti(x1) + ti(x2) + ti(x1, x2, k = c(20,20)), data = train_df, method = 'ML')
+
+ti_model_marginal_interaction %>% summary()
+```
+
+```{r}
+gams_smooth_model <- gam(y ~ s(x1) + s(x2), data = train_df, method = 'REML')
+
+gams_smooth_model %>% summary()
+```
+
+```{r}
+te_model_interaction <- gam(y ~ te(x1, x2, k = c(20,20)), data = train_df, method = 'ML')
+
+te_model_interaction %>% summary()
+```
+
+
+```{r}
+vis.gam(te_model_interaction)
+plot(te_model_interaction, residuals=TRUE, pch=2, las=2)
+vis.gam(te_model_interaction, view=c("x1","x2"), plot.type = "contour", color= "topo")
+```
+
+```{r}
+library(mgcViz)
+```
+
+```{r}
+# coverting gam object to a getViz object for plotting gam terms
+te_model_interaction <- getViz(te_model_interaction)
+```
+
+
+```{r}
+#plot method from mgcViz object helps in plotting 2D
+plot(sm(te_model_interaction, 1)) + l_fitRaster() + l_fitContour()
+```
+
+```{r}
+#Convert viz object back to gam object
+te_model_interaction <- getGam(te_model_interaction)
+```
+
+```{r}
+te_basis_matrix <- predict.gam(te_model_interaction, type = "lpmatrix")
+#te_basis_matrix
+```
+
+```{r}
+te_basis_matrix %>% as.data.frame() %>% tbl_df() %>%
+  select(-'(Intercept)') %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(), by = 'rowid') %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key, 
+                  c("te_word", "te_id"),
+                  sep = '\\.',
+                  fill = "right",
+                  remove = FALSE) %>%
+  mutate(id = factor(te_id, levels = as.vector(unique(te_id)))) %>%
+  filter(id %in% seq(1, 400, by = 40)) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b()
+```
+
+```{r}
+te_basis_matrix %>% as.data.frame() %>% tbl_df() %>%
+  select(-'(Intercept)') %>%
+  tibble::rowid_to_column() %>%
+  left_join(coarse_grid %>% tibble::rowid_to_column(), by = 'rowid') %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  tidyr::separate(key, 
+                  c("te_word", "te_id"),
+                  sep = '\\.',
+                  fill = "right",
+                  remove = FALSE) %>%
+  filter(te_id %in% seq(1, 40, by = 2)) %>%
+  mutate(id = factor(key, levels = as.vector(unique(key)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r}
+SmoothCon_te_basis = smoothCon(te(x1, x2, k=c(4,4)), data = train_df)[[1]]
+
+SmoothCon_te_basis$X %>% as.data.frame() %>% tbl_df() %>% 
+  tibble::rowid_to_column() %>% 
+  left_join(coarse_grid %>% tibble::rowid_to_column(),
+            by = "rowid") %>%
+  tidyr::gather(key = "key", value = "value", -rowid, -x1, -x2) %>%
+  mutate(id = factor(key, levels = as.vector(unique(key)))) %>%
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = value)) +
+  facet_wrap(~ id, labeller = "label_both") +
+  scale_fill_viridis_b() +
+  theme_bw()
+```
+
+```{r,eval=TRUE}
+gam_te_pred_fine_df <- predict(te_model_interaction, fine_df[c('x1','x2')], type = 'link', se.fit = TRUE)
+
+fine_gam_tensor_ti_pred_matrix <- fine_df %>% mutate(pred_log_y = gam_te_pred_fine_df$fit) %>%
+  mutate(pred_log_y_lwr = gam_te_pred_fine_df$fit - 2*gam_te_pred_fine_df$se.fit) %>%
+  mutate(pred_log_y_upr = gam_te_pred_fine_df$fit + 2*gam_te_pred_fine_df$se.fit)
+
+fine_gam_tensor_ti_pred_matrix
+```
+
+```{r, eval=TRUE}
+### focus on the x2-trend
+fine_gam_tensor_ti_pred_matrix %>%
+  filter(x1_id %in% seq(1, 41, by = 4),
+         x2_id %in% seq(1, 41, by = 4)) %>% 
+  ggplot(mapping = aes(x = x1)) +
+  geom_ribbon(mapping = aes(ymin = pred_log_y_lwr, ymax = pred_log_y_upr,
+                            group = x2),
+              fill = "grey", alpha = 0.5) +
+  geom_line(mapping = aes(y = pred_log_y,
+                          group = x2),
+            color = "black") +
+  geom_point(mapping = aes(y = y),
+             color = "red", size = 0.85) +
+  facet_wrap(~ x2) +
+  theme_bw()
+```
+
+```{r, eval=TRUE}
+### next look at x1 and x2 locations that were NOT in the training set
+fine_gam_tensor_ti_pred_matrix %>% 
+  filter(x1_id %in% seq(2, 41, by = 4),
+         x2_id %in% seq(2, 41, by = 4)) %>% 
+  ggplot(mapping = aes(x = x1)) +
+  geom_ribbon(mapping = aes(ymin = pred_log_y_lwr, ymax = pred_log_y_upr,
+                            group = x2),
+              fill = "grey", alpha = 0.5) +
+  geom_line(mapping = aes(y = pred_log_y,
+                          group = x2),
+            color = "blue") +
+  geom_point(mapping = aes(y = y),
+             color = "red", size = 0.85) +
+  facet_wrap(~ x2, labeller = "label_both") +
+  theme_bw()
+```
+
+
+```{r}
+fine_gam_tensor_ti_pred_matrix %>% 
+  ggplot(mapping = aes(x = x1, y = x2)) +
+  geom_raster(mapping = aes(fill = pred_log_y)) +
+  scale_fill_viridis_c() +
+  coord_equal() +
+  theme_bw()
+```
+
+
